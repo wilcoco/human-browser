@@ -1,0 +1,8 @@
+{
+  "name": "human-browser-api",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.14.0" },
+  "scripts": { "start": "node server.mjs", "test": "node --test ../../tests/api/*.test.mjs" }
+}
