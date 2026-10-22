@@ -1,0 +1,7 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="org.humanbrowser.android.recordtests">
+    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="35" />
+    <application android:label="Human Browser Record Tests" android:allowBackup="false" />
+    <instrumentation android:name="org.humanbrowser.android.recordtests.RecordStoreChecks"
+        android:targetPackage="org.humanbrowser.android.recordtests" />
+</manifest>

@@ -1,0 +1,10 @@
+.DS_Store
+work/
+outputs/
+.release-keys/
+*.jks
+*.keystore
+local.properties
+.gradle/
+*.apk
+*.idsig
