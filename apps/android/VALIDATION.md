@@ -1,3 +1,7 @@
+# 최신 버전 검증
+
+0.2.0의 실제 Railway 공유·업데이트 시험은 [BACKEND-VALIDATION.md](BACKEND-VALIDATION.md)를 참고하세요. 아래는 0.1.0 당시의 로컬 기능 검증 기록입니다.
+
 # Android 0.1.0 Alpha 검증
 
 2026-10-22 · Android 12 / API 31 ARM64 전용 에뮬레이터 · 합성 자료만 사용

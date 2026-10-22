@@ -85,3 +85,22 @@ test('a valid signature with noncanonical JSON cannot poison Android feed',()=>{
  r.signature=sign('sha256',Buffer.from(r.signedPayload),key.privateKey).toString('base64');
  assert.throws(()=>validateRecord(r),/noncanonical_payload/);
 });
+
+test('one URL shares each author’s complete judgment while another URL remains separate',async()=>{
+ const db=memory(),server=createApp({db});await new Promise(r=>server.listen(0,'127.0.0.1',r));const base='http://127.0.0.1:'+server.address().port;
+ const url='https://example.com/shared-judgment',other='https://example.com/different-judgment';
+ const alice=identity(),bob=identity();
+ const judgment=record(alice,{url,kind:'decision',title:'자료 검토',quote:'판단의 근거 문장',text:'추가 근거를 기다립니다.',disposition:'보류'});
+ const question=record(bob,{url,kind:'question',text:'어떤 근거가 더 필요한가요?'});
+ try {
+  for(const r of [judgment,question,record(alice,{url:other,text:'다른 페이지의 판단'})]) {
+   const response=await fetch(base+'/v1/records',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(r)});assert.equal(response.status,201);
+  }
+  // A separate reader needs only the shared source URL, not the author’s local files or key.
+  const response=await fetch(base+'/v1/records?url='+encodeURIComponent(url));const body=await response.json();
+  assert.equal(body.records.length,2);assert.equal(new Set(body.records.map(r=>r.actorId)).size,2);
+  const seen=body.records.find(r=>r.id===judgment.id);
+  for(const k of ['text','quote','disposition','url','actorId','signature'])assert.equal(seen[k],judgment[k]);
+  assert.ok(body.records.every(r=>r.url===url));
+ } finally {await new Promise(r=>server.close(r));db.close();}
+});
