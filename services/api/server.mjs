@@ -9,8 +9,8 @@ const MAX_BODY=256*1024;
 export function createApp({db,limits={},trustRailway=false}={}) {
   const buckets=new Map(),salt=randomBytes(32);
   function throttle(req) {
-    // Railway's edge supplies X-Railway-Client-IP; never trust arbitrary X-Forwarded-For.
-    const address=trustRailway?String(req.headers['x-railway-client-ip']||req.socket.remoteAddress):req.socket.remoteAddress;
+    // Railway's edge supplies X-Real-IP; never trust arbitrary X-Forwarded-For.
+    const address=trustRailway?String(req.headers['x-real-ip']||req.socket.remoteAddress):req.socket.remoteAddress;
     const key=createHmac('sha256',salt).update(address||'unknown').digest('hex');
     const now=Date.now(),minute=Math.floor(now/60000),old=buckets.get(key);
     const bucket=old?.minute===minute?old:{minute,n:0}; bucket.n++; buckets.set(key,bucket);

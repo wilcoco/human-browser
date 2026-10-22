@@ -295,6 +295,16 @@ public final class RecordStore extends SQLiteOpenHelper {
         db.insertOrThrow("records", null, values);
     }
 
+    public static JSONObject verifyExternal(String json) throws Exception { return verifiedRecord(json); }
+
+    public synchronized JSONObject withdrawalFor(String id) throws Exception {
+        validateId(id);
+        try (Cursor cursor = getReadableDatabase().rawQuery("SELECT record_json FROM records WHERE operation='withdrawal' AND withdrawn_id=?", new String[]{id})) {
+            if (cursor.moveToFirst()) return verifiedRecord(cursor.getString(0));
+        }
+        throw invalid("Withdrawal was not found.");
+    }
+
     private static JSONObject verifiedRecord(String json) throws Exception {
         JSONObject record = new JSONObject(json);
         JSONObject payload = new JSONObject(record.toString());

@@ -31,6 +31,11 @@ public final class MainActivity extends Activity {
     private ScrollView recordsScroll;
     private ProgressBar progress;
     private RecordStore store;
+    private PublicApi publicApi;
+    private volatile boolean publicMode;
+    private boolean publicBusy;
+    private volatile long publicGeneration;
+    private final java.util.concurrent.ExecutorService network = java.util.concurrent.Executors.newSingleThreadExecutor();
     private JSONObject draft;
     private String draftToken = UUID.randomUUID().toString(), currentUrl = "", failedUrl = "";
     private long navigationGeneration = 0;
@@ -51,6 +56,7 @@ public final class MainActivity extends Activity {
             String saved = getPreferences(MODE_PRIVATE).getString("draft", "");
             if (!saved.isEmpty()) draft = new JSONObject(saved);
         } catch (Exception e) { toast("보관한 초안을 읽지 못했습니다. 원본은 앱 저장소에 남아 있습니다."); }
+        publicApi = new PublicApi(this);
         buildUI(); configureWeb();
         String shared = getIntent().getStringExtra(Intent.EXTRA_TEXT);
         if (Intent.ACTION_SEND.equals(getIntent().getAction()) && shared != null) openSharedUrl(shared);
@@ -104,7 +110,8 @@ public final class MainActivity extends Activity {
         panel = vertical(); panel.setPadding(dp(12), 0, dp(12), dp(6)); panel.setVisibility(View.GONE);
         LinearLayout tools = row(); panelTitle = text("이 페이지의 기록", 14, INK);
         tools.addView(panelTitle, new LinearLayout.LayoutParams(0, dp(42), 1));
-        tools.addView(button("전체/현재", v -> { allRecords = !allRecords; refreshRecords(); }));
+        tools.addView(button("공개/개인", v -> switchPublicMode()));
+        tools.addView(button("전체/현재", v -> { if(publicMode) { refreshRecords(); } else { allRecords = !allRecords; refreshRecords(); } }));
         tools.addView(button("접기", v -> togglePanel())); panel.addView(tools);
         recordsScroll = new ScrollView(this); recordsBox = vertical(); recordsScroll.addView(recordsBox);
         panel.addView(recordsScroll, new LinearLayout.LayoutParams(-1, -1));
@@ -298,7 +305,7 @@ public final class MainActivity extends Activity {
                 .setNegativeButton("계속 수정",null).setPositiveButton("확인하고 저장",null).create();
             confirm.setOnShowListener(d -> confirm.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
                 if (!token.equals(draftToken)) { confirm.dismiss(); toast("초안이 바뀌었습니다. 다시 확인해 주세요."); return; }
-                try { store.commit(recordPayload(frozen)); clearDraft(); confirm.dismiss(); if (editor != null) editor.dismiss();
+                try { store.commit(recordPayload(frozen)); clearDraft(); publicMode=false; confirm.dismiss(); if (editor != null) editor.dismiss();
                       if (!expanded) togglePanel(); refreshRecords(); toast("이 기기에 저장했습니다."); }
                 catch (Exception e) { toast("저장 실패: " + e.getMessage()); }
             })); confirm.show();
@@ -329,6 +336,8 @@ public final class MainActivity extends Activity {
     }
     private void refreshRecords() {
         if (recordsBox == null || store == null) return;
+        publicGeneration++;
+        if(publicMode) { loadPublic(0,false); return; }
         recordsBox.removeAllViews(); panelTitle.setText(allRecords ? "전체 로컬 기록" : "이 페이지의 기록");
         if (draft != null) recordsBox.addView(button("작성 중인 초안 이어쓰기",v -> showEditor()));
         try {
@@ -348,15 +357,75 @@ public final class MainActivity extends Activity {
                 if (!record.optString("targetId").isEmpty()) card.addView(text("대상 기록: "+record.optString("targetId"),10,MUTED));
                 LinearLayout links=row(); addAction(links,"답변",v -> targetRecord(record,"answer")); addAction(links,"평가",v -> targetRecord(record,"evaluation")); addAction(links,"연결",v -> targetRecord(record,"relation"));
                 addAction(links,"철회",v -> new AlertDialog.Builder(this).setTitle("승인을 철회할까요?")
-                    .setMessage("원기록과 철회 이력은 보존됩니다.").setNegativeButton("취소",null)
-                    .setPositiveButton("철회",(d,w) -> { try { store.withdraw(record.optString("id")); refreshRecords(); } catch(Exception e){ toast(e.getMessage()); } }).show()); card.addView(links);
+                    .setMessage("원기록과 철회 이력은 보존됩니다. 공개한 기록이면 서버에도 철회를 요청합니다. 전송 실패 시 메뉴의 공개 요청 재전송을 이용하세요.").setNegativeButton("취소",null)
+                    .setPositiveButton("철회",(d,w) -> { try { withdrawRecord(record); refreshRecords(); } catch(Exception e){ toast(e.getMessage()); } }).show()); card.addView(links);
+                card.addView(button(publicApi.wasPublishedOrQueued(record.optString("id")) ? "공개 요청됨 · 재전송" : "이 기록 공개하기",v -> confirmPublish(record)));
             }
         } catch(Exception e) { recordsBox.addView(text("기록을 읽지 못했습니다: "+e.getMessage(),13,MUTED)); }
+    }
+    private void switchPublicMode() {
+        if(publicMode) { publicMode=false; refreshRecords(); return; }
+        new AlertDialog.Builder(this).setTitle("공개 댓글 보기")
+            .setMessage("공개 보기 중 이 페이지와 이후 이동한 페이지의 주소를 사람 브라우저 서버에 보내 댓글을 조회합니다. 개인 기록·초안·웹페이지 본문은 전송하지 않습니다. ‘공개/개인’을 다시 누르면 개인 모드로 돌아갑니다.")
+            .setNegativeButton("취소",null).setPositiveButton("공개 보기",(d,w)->{publicMode=true;refreshRecords();}).show();
+    }
+    private void confirmPublish(JSONObject record) {
+        String detail=record.optString("url")+"\n\n"+record.optString("quote")+"\n\n"+record.optString("text")+"\n"+record.optString("criterion")+" "+record.optString("value")+" "+record.optString("disposition")+"\n\n대상: "+record.optString("targetId")+"\n\n이 기록의 출처·인용·의견·기기 공개키가 서버에 저장되고 누구나 볼 수 있습니다. 철회해도 서버 이력과 전달된 사본은 남습니다. 다른 개인 기록은 전송하지 않습니다.";
+        TextView detailView=text(detail,14,INK);detailView.setPadding(dp(20),dp(8),dp(20),dp(8));ScrollView scroll=new ScrollView(this);scroll.addView(detailView);
+        new AlertDialog.Builder(this).setTitle("이 기록을 공개할까요?").setView(scroll).setNegativeButton("취소",null)
+            .setPositiveButton("확인하고 공개",(d,w)->{try{publicApi.enqueue(record);flushPublic();}catch(Exception e){toast(e.getMessage());}}).show();
+    }
+    private void withdrawRecord(JSONObject record) throws Exception {
+        String id=record.getString("id"); boolean shared=publicApi.wasPublishedOrQueued(id);
+        store.withdraw(id);
+        if(shared){publicApi.enqueue(store.withdrawalFor(id));flushPublic();}
+    }
+    private void flushPublic() {
+        if(publicBusy){toast("서버 전송 중입니다.");return;}
+        try {
+            JSONArray history=new JSONObject(store.exportJSON()).getJSONArray("records");
+            for(int i=0;i<history.length();i++) { JSONObject r=history.getJSONObject(i);
+                if("withdrawal".equals(r.optString("operation")) && publicApi.wasPublishedOrQueued(r.optString("withdrawnRecordId")) && !publicApi.wasPublishedOrQueued(r.optString("id"))) publicApi.enqueue(r);
+            }
+        }catch(Exception e){toast("철회 요청 확인 실패: "+e.getMessage());return;}
+        publicBusy=true;toast("공개 요청을 전송합니다.");
+        network.execute(()->{String message;
+            try{publicApi.flush();message="공개 요청이 서버에 반영되었습니다.";}catch(Exception e){message="전송 보류: "+e.getMessage()+" · 메뉴에서 재전송할 수 있습니다.";}
+            final String result=message;handler.post(()->{publicBusy=false;if(!isDestroyed()){toast(result);refreshRecords();}});
+        });
+    }
+    private void loadPublic(long before,boolean append) {
+        final long generation=publicGeneration;final String source=currentUrl;
+        if(!append)recordsBox.removeAllViews();panelTitle.setText("이 페이지의 공개 기록");
+        TextView loading=text("서버에서 불러오는 중…",12,MUTED);recordsBox.addView(loading);
+        network.execute(()->{if(!publicMode || generation!=publicGeneration)return; JSONObject result=null;String error=null;
+            try{result=publicApi.page(source,before);}catch(Exception e){error=e.getMessage();}
+            final JSONObject page=result;final String failure=error;
+            handler.post(()->{
+                if(isDestroyed()||!publicMode||generation!=publicGeneration||!source.equals(currentUrl))return;
+                recordsBox.removeView(loading);
+                if(failure!=null){recordsBox.addView(text("불러오기 실패: "+failure,13,MUTED));recordsBox.addView(button("다시 불러오기",v->refreshRecords()));return;}
+                JSONArray records=page.optJSONArray("records");
+                if(records.length()==0&&!append)recordsBox.addView(text("공개된 기록이 없습니다. 개인 기록의 ‘공개하기’로 참여하세요.",14,MUTED));
+                for(int i=0;i<records.length();i++)renderPublicCard(records.optJSONObject(i));
+                long next=page.optLong("nextBefore",0);
+                if(next>0){Button more=button("이전 기록 더 보기",null);more.setOnClickListener(v->{recordsBox.removeView(more);loadPublic(next,true);});recordsBox.addView(more);}
+            });
+        });
+    }
+    private void renderPublicCard(JSONObject r) {
+        LinearLayout card=vertical();card.setPadding(dp(12),dp(8),dp(12),dp(8));card.setBackground(round(Color.WHITE));recordsBox.addView(card);
+        card.addView(text(label(r.optString("kind"))+" · 공개 기록",13,GREEN));
+        TextView actor=text(r.optString("actorId"),10,MUTED);actor.setTextIsSelectable(true);card.addView(actor);
+        if(!r.optString("quote").isEmpty())card.addView(text("“"+r.optString("quote")+"”",12,MUTED));
+        card.addView(text(r.optString("text")+"\n"+r.optString("criterion")+" "+r.optString("value")+" "+r.optString("disposition"),15,INK));
+        if(!r.optString("targetId").isEmpty())card.addView(text("대상: "+r.optString("targetId"),10,MUTED));
+        LinearLayout actions=row();addAction(actions,"답변",v->targetRecord(r,"answer"));addAction(actions,"평가",v->targetRecord(r,"evaluation"));addAction(actions,"연결",v->targetRecord(r,"relation"));card.addView(actions);
     }
     private void togglePanel() { expanded=!expanded; panel.setVisibility(expanded?View.VISIBLE:View.GONE); if(expanded) refreshRecords(); }
     private void showMenu(View anchor) {
         PopupMenu menu=new PopupMenu(this,anchor);
-        String[] actions={"사용 연습 페이지","새로고침","초안 이어쓰기","기록 내보내기","앱 정보"};
+        String[] actions={"사용 연습 페이지","새로고침","초안 이어쓰기","기록 내보내기","앱 정보","공개 요청 재전송"};
         for(int i=0;i<actions.length;i++) menu.getMenu().add(0,i,i,actions[i]);
         menu.setOnMenuItemClickListener(item -> {
             switch(item.getItemId()) {
@@ -364,9 +433,10 @@ public final class MainActivity extends Activity {
                 case 1: pageReady=false; web.reload(); break;
                 case 2: if(draft!=null) showEditor(); else toast("작성 중인 초안이 없습니다."); break;
                 case 3: exportRecords(); break;
-                case 4: new AlertDialog.Builder(this).setTitle("사람 브라우저 · 0.1.0 알파")
-                    .setMessage("웹페이지는 휴대폰에서 직접 엽니다. 댓글·판단·초안은 앱 내부에 보관합니다.\n\n다른 사람과의 동기화, AI 연결, 파일 업로드·다운로드, 카메라·마이크·위치는 이 버전에 없습니다. HTTPS 페이지를 지원합니다.\n\n웹사이트는 접속 주소와 일반적인 웹 요청을 받습니다. 앱의 기록은 내보내기를 선택한 경우에만 파일로 나갑니다. 앱 삭제 시 로컬 기록과 서명 키가 삭제됩니다.\n\nMac 개발판과 기록 파일 형식은 아직 호환되지 않습니다.")
+                case 4: new AlertDialog.Builder(this).setTitle("사람 브라우저 · 0.2.0 알파")
+                    .setMessage("웹페이지는 휴대폰에서 직접 엽니다. 개인 기록과 초안은 앱 내부에 보관합니다. 공개하기를 확인한 기록만 Railway 서버에 전송합니다.\n\n공개/개인 버튼에서 다른 사람의 공개 기록을 볼 수 있습니다. 공개 보기 중에는 페이지 주소가 서버로 전달됩니다. AI와 분산망은 아직 없습니다. HTTPS 페이지를 지원합니다.\n\n웹사이트는 접속 주소와 일반적인 웹 요청을 받습니다. 공개한 기록은 다른 사람이 열람·복사할 수 있습니다. 철회하면 공개 목록에서 숨겨지며 서버 이력과 이미 전달된 사본은 남습니다. 앱 삭제 시 로컬 기록과 서명 키가 삭제됩니다.\n\nMac 개발판과 기록 파일 형식은 아직 호환되지 않습니다.")
                     .setPositiveButton("확인",null).show(); break;
+                case 5: flushPublic(); break;
             } return true;
         }); menu.show();
     }
@@ -394,7 +464,7 @@ public final class MainActivity extends Activity {
     private void persistDraft(){ getPreferences(MODE_PRIVATE).edit().putString("draft",draft==null?"":draft.toString()).apply(); }
     @Override protected void onResume(){ super.onResume(); handler.post(observe); if(web!=null) web.onResume(); }
     @Override protected void onPause(){ handler.removeCallbacks(observe); persistDraft(); if(web!=null) web.onPause(); super.onPause(); }
-    @Override protected void onDestroy(){ handler.removeCallbacksAndMessages(null); if(editor!=null) editor.dismiss(); if(web!=null){root.removeView(web);web.destroy();} if(store!=null) store.close();super.onDestroy(); }
+    @Override protected void onDestroy(){ handler.removeCallbacksAndMessages(null); if(editor!=null) editor.dismiss(); if(web!=null){root.removeView(web);web.destroy();} network.shutdown(); if(store!=null) store.close();super.onDestroy(); }
     @Override public void onBackPressed(){ if(expanded){togglePanel();return;} if(web.canGoBack()){web.goBack();return;}super.onBackPressed(); }
     private void addChoice(LinearLayout parent,String label,String key,String[] values){
         parent.addView(text(label,12,MUTED)); Spinner s=spinner(values,indexOf(values,draft.optString(key)));parent.addView(s);

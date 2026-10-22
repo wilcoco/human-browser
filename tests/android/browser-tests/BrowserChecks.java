@@ -12,7 +12,7 @@ import java.lang.reflect.*;
 import java.util.concurrent.*;
 
 /** Explicitly automated synthetic interactions in an isolated emulator; never real human testimony. */
-public final class BrowserChecks extends Instrumentation {
+public class BrowserChecks extends Instrumentation {
     Activity activity; int checks;
     interface Work { void run() throws Exception; }
     interface Condition { boolean get() throws Exception; }

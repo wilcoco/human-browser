@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {generateKeyPairSync,randomUUID,sign} from 'node:crypto';
-import {mkdtempSync,rmSync} from 'node:fs';
+import {mkdtempSync,rmSync,readFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {hash,validateRecord} from '../../services/api/records.mjs';
+import {hash,validateRecord,canonical} from '../../services/api/records.mjs';
 import {openDatabase,publish,listPage} from '../../services/api/database.mjs';
 import {createApp} from '../../services/api/server.mjs';
 export function identity(){return generateKeyPairSync('ec',{namedCurve:'prime256v1'});}
@@ -12,7 +12,7 @@ export function record(key=identity(),changes={}) {
  const publicKey=key.publicKey.export({format:'der',type:'spki'});
  const r={url:'https://example.com/article?a=1',title:'시험',quote:'사람의 판단 💬 / "검토"',capturedAt:new Date().toISOString(),kind:'comment',text:'합성 테스트 기록',targetId:'',criterion:'',value:'',disposition:'',relation:'',id:randomUUID(),protocolVersion:'android-local-alpha/1',canonicalization:'android-fixed-string-json/1',algorithm:'SHA256withECDSA/P-256',actorId:'actor:'+hash(publicKey),publicKey:publicKey.toString('base64'),createdAt:new Date().toISOString(),operation:'record',withdrawnRecordId:'',...changes};
  r.quoteDigest=hash(r.quote);
- r.signedPayload=JSON.stringify(Object.fromEntries(Object.entries(r).sort(([a],[b])=>a.localeCompare(b,'en'))));
+ r.signedPayload=canonical(r);
  r.signature=sign('sha256',Buffer.from(r.signedPayload),key.privateKey).toString('base64');return r;
 }
 const memory=()=>openDatabase(':memory:');
@@ -40,7 +40,7 @@ test('owner-only withdrawal preserves history and dependent evaluation',()=>{
  const db=memory(),key=identity(),r=record(key);publish(db,r);
  const e=record(identity(),{kind:'evaluation',targetId:r.id,criterion:'도움',value:'유용'});publish(db,e);
  assert.throws(()=>publish(db,withdrawal(identity(),r)),/withdrawal_not_owner/);
- assert.throws(()=>publish(db,record(key,{...withdrawal(key,r),url:'https://example.com/wrong'})),/payload_mismatch|invalid_signature|withdrawal_not_owner/);
+ assert.throws(()=>publish(db,record(key,{...withdrawal(key,r),url:'https://example.com/wrong'})),/payload_mismatch|noncanonical_payload|invalid_signature|withdrawal_not_owner/);
  publish(db,withdrawal(key,r));assert.equal(listPage(db,r.url).records.length,1);
  assert.equal(publish(db,r).duplicate,true);assert.equal(listPage(db,r.url).records[0].id,e.id);
  assert.equal(publish(db,withdrawal(key,r)).duplicate,true);assert.equal(db.prepare('SELECT COUNT(*) n FROM records').get().n,3);db.close();
@@ -73,4 +73,15 @@ test('HTTP validation, cross-client publication, retrieval and withdrawal',async
  assert.equal((await post(withdrawal(key,r))).status,201);assert.equal((await(await fetch(page)).json()).records.length,0);
  assert.equal((await fetch(base+'/unknown')).status,404);
  }finally{await new Promise(r=>server.close(r));db.close();}
+});
+
+test('real AndroidKeyStore fixture is accepted and hidden after owner withdrawal',()=>{
+ const archive=JSON.parse(readFileSync(new URL('./android-fixture.json',import.meta.url)));const db=memory();
+ for(const event of archive.records) publish(db,event);
+ assert.equal(listPage(db,archive.records[0].url).records.length,0);db.close();
+});
+test('a valid signature with noncanonical JSON cannot poison Android feed',()=>{
+ const key=identity(),r=record(key);r.signedPayload=JSON.stringify(JSON.parse(r.signedPayload));
+ r.signature=sign('sha256',Buffer.from(r.signedPayload),key.privateKey).toString('base64');
+ assert.throws(()=>validateRecord(r),/noncanonical_payload/);
 });

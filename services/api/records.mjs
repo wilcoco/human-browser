@@ -1,6 +1,7 @@
 import {createPublicKey, createHash, verify} from 'node:crypto';
 export class ApiError extends Error { constructor(status, code) { super(code); this.status=status; } }
 export const fail = (code, status=400) => { throw new ApiError(status, code); };
+export const canonical = value => JSON.stringify(Object.fromEntries(Object.keys(value).sort().map(k=>[k,value[k]]))).replaceAll('/', '\\/');
 export const hash = value => createHash('sha256').update(value).digest('hex');
 const draftFields = ['url','title','quote','capturedAt','kind','text','targetId','criterion','value','disposition','relation'];
 const fields = [...draftFields,'id','protocolVersion','canonicalization','algorithm','actorId','publicKey','createdAt','operation','withdrawnRecordId','quoteDigest'].sort();
@@ -24,6 +25,7 @@ export function validateRecord(record) {
   }
   let payload; try{payload=JSON.parse(record.signedPayload);}catch{fail('invalid_payload');}
   if(!payload || Array.isArray(payload) || Object.keys(payload).sort().join()!==fields.join() || fields.some(k=>payload[k]!==record[k])) fail('payload_mismatch');
+  if(canonical(payload)!==record.signedPayload) fail('noncanonical_payload');
   if(record.protocolVersion!=='android-local-alpha/1' || record.canonicalization!=='android-fixed-string-json/1' || record.algorithm!=='SHA256withECDSA/P-256') fail('unsupported_protocol');
   if(!uuid(record.id)) fail('invalid_id'); sourceUrl(record.url);
   for(const k of ['createdAt','capturedAt']) if(!/^\d{4}-\d{2}-\d{2}T.*Z$/.test(record[k]) || !Number.isFinite(Date.parse(record[k]))) fail('invalid_timestamp');
