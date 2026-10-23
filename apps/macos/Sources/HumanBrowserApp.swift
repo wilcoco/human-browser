@@ -14,6 +14,8 @@ struct ReviewItem: Identifiable {
     let id = UUID()
     let draft: RecordDraft
     let targetRecord: SignedRecord?
+    var publicTarget: SharedRecord? = nil
+    var localRecordID: String? = nil
 }
 
 private struct LocalDraft: Codable {
@@ -25,6 +27,7 @@ private struct LocalDraft: Codable {
     var disposition: String
     var relation: String
     var targetID: String?
+    var publicTarget: SharedRecord?
 }
 
 @MainActor
@@ -43,6 +46,9 @@ final class AppModel: ObservableObject {
     @Published var disposition = "보류"
     @Published var relation = "근거로 연결"
     @Published var targetID: String?
+    @Published var publicTarget: SharedRecord?
+    @Published var shared: SharedStore?
+    private var sharedObservation: AnyCancellable?
     @Published var review: ReviewItem?
     @Published var showAllRecords = false
     @Published var ledgerRevision = 0
@@ -58,7 +64,7 @@ final class AppModel: ObservableObject {
         tabs.first { $0.id == selectedTabID } ?? tabs.first
     }
 
-    init(directoryOverride: URL? = nil, signer: (any RecordSigner)? = nil) {
+    init(directoryOverride: URL? = nil, signer: (any RecordSigner)? = nil, sharingFactory: ((URL) throws -> SharedStore)? = nil) {
         do {
             let path = Bundle.main.object(forInfoDictionaryKey: "HBDevelopmentDataDirectory") as? String
             let support = try FileManager.default.url(for: .applicationSupportDirectory,
@@ -66,6 +72,11 @@ final class AppModel: ObservableObject {
             let directory = directoryOverride ?? path.map { URL(fileURLWithPath: $0) } ??
                 support.appendingPathComponent("org.humanbrowser.alpha", isDirectory: true)
             ledger = try LedgerStore(directory: directory, signer: signer)
+            do {
+                let sharing = try sharingFactory?(directory) ?? SharedStore(directory: directory)
+                shared = sharing
+                sharedObservation = sharing.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }
+            } catch { errorMessage = "공유 저장소를 열지 못했습니다. 기존 파일은 유지됩니다: \(error.localizedDescription)" }
             draftFile = directory.appendingPathComponent("unapproved-draft.json")
             try restoreDraft()
             storageReady = true
@@ -86,6 +97,8 @@ final class AppModel: ObservableObject {
         draftSource = draft.source; draftKind = draft.kind; draftText = draft.text
         criterion = draft.criterion; evaluation = draft.evaluation
         disposition = draft.disposition; relation = draft.relation; targetID = draft.targetID
+        publicTarget = draft.publicTarget
+        if let publicTarget { _ = try publicTarget.verified() }
         lastDraftData = data
         notice = "이전에 작성하던 초안을 불러왔습니다. 아직 승인한 기록은 아닙니다."
     }
@@ -99,7 +112,7 @@ final class AppModel: ObservableObject {
                 return
             }
             let draft = LocalDraft(source: source, kind: draftKind, text: draftText, criterion: criterion,
-                                   evaluation: evaluation, disposition: disposition, relation: relation, targetID: targetID)
+                                   evaluation: evaluation, disposition: disposition, relation: relation, targetID: targetID, publicTarget: publicTarget)
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.sortedKeys]
             let data = try encoder.encode(draft)
@@ -159,6 +172,7 @@ final class AppModel: ObservableObject {
         draftText = ""
         draftKind = .comment
         targetID = nil
+        publicTarget = nil
         disposition = "보류"
         criterion = "도움 정도"
         evaluation = "긍정"
@@ -170,6 +184,7 @@ final class AppModel: ObservableObject {
         if kind == .relation, draftSource != nil {
             draftGeneration = UUID()
             targetID = record.id
+            publicTarget = nil
             draftKind = .relation
             notice = "초안의 출처와 내용은 유지하고, 연결할 기록을 선택했습니다."
             return
@@ -181,6 +196,7 @@ final class AppModel: ObservableObject {
         draftGeneration = UUID()
         draftSource = record.source
         targetID = record.id
+        publicTarget = nil
         draftKind = kind
         showAllRecords = false
     }
@@ -204,11 +220,11 @@ final class AppModel: ObservableObject {
             evaluationCriterion: draftKind == .evaluation ? criterion : nil,
             evaluationValue: draftKind == .evaluation ? evaluation : nil,
             disposition: draftKind == .decision ? disposition : nil
-        ), targetRecord: records.first { $0.id == targetID })
+        ), targetRecord: records.first { $0.id == targetID }, publicTarget: publicTarget)
     }
 
     func saveReviewed(_ item: ReviewItem) {
-        guard review?.id == item.id, let ledger else { return }
+        guard review?.id == item.id, item.publicTarget == nil, item.localRecordID == nil, let ledger else { return }
         do {
             _ = try ledger.commitDraft(item.draft)
             review = nil
@@ -217,6 +233,48 @@ final class AppModel: ObservableObject {
             refresh()
             notice = "이 기기에 저장했습니다. 외부로 전송하지 않았습니다."
         } catch { errorMessage = "저장하지 못했습니다: \(error.localizedDescription)" }
+    }
+
+    func targetPublic(_ record: SharedRecord, kind: RecordKind) {
+        guard draftSource == nil && draftText.isEmpty else {
+            notice = "작성 중인 내용을 먼저 저장하거나 ‘새 기록’으로 정리해 주세요."
+            return
+        }
+        draftGeneration = UUID()
+        draftSource = SourceSnapshot(url: record["url"], title: record["title"], quote: record["quote"])
+        targetID = record.id; publicTarget = record; draftKind = kind
+        notice = "공개 기록에 연결할 초안입니다. 내용 확인 후 직접 공개해야 전송됩니다."
+    }
+
+    func preparePublication(_ record: SignedRecord) {
+        guard record.actorID == ledger?.actorID else {
+            errorMessage = "다른 사람의 기록을 내 서명으로 다시 공개할 수 없습니다."
+            return
+        }
+        let p = record.payload
+        review = ReviewItem(draft: RecordDraft(source: record.source, kind: record.kind, text: record.text,
+            relationTargetID: record.relationTargetID, relationKind: p.relationKind.isEmpty ? nil : p.relationKind,
+            evaluationCriterion: p.evaluationCriterion.isEmpty ? nil : p.evaluationCriterion,
+            evaluationValue: p.evaluationValue.isEmpty ? nil : p.evaluationValue,
+            disposition: p.disposition.isEmpty ? nil : p.disposition),
+            targetRecord: records.first { $0.id == record.relationTargetID }, localRecordID: record.id)
+    }
+
+    func publishReviewed(_ item: ReviewItem) {
+        guard review?.id == item.id, let shared else { return }
+        do {
+            _ = try shared.publish(item.draft, publicTarget: item.publicTarget, localID: item.localRecordID)
+            review = nil
+            if item.localRecordID == nil { resetDraft(); persistDraft() }
+            notice = "공개를 승인했습니다. 전송 상태는 ‘함께 보는 판단’에서 확인하세요."
+            Task { await shared.sync() }
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    func withdrawPublic(_ record: SharedRecord) {
+        guard let shared else { return }
+        do { try shared.withdraw(record); Task { await shared.sync() } }
+        catch { errorMessage = error.localizedDescription }
     }
 
     func refresh() {
@@ -229,9 +287,13 @@ final class AppModel: ObservableObject {
     func withdraw(_ record: SignedRecord) {
         guard let ledger else { return }
         do {
+            guard record.actorID == ledger.actorID else { throw LedgerError.notOwner }
+            guard let shared else { throw SharingError(message: "공유 상태를 확인할 수 없어 철회하지 않았습니다.") }
+            try shared.withdrawLocal(record.id)
             _ = try ledger.withdraw(recordID: record.id)
+            Task { await shared.sync() }
             refresh()
-            notice = "승인을 철회했습니다. 원기록과 철회 이력은 보존됩니다."
+            notice = "기기의 승인을 철회했습니다. 공개된 기록은 서버 철회 확인까지 다른 기기에 보일 수 있습니다. 원기록과 철회 이력은 보존됩니다."
         } catch { errorMessage = error.localizedDescription }
     }
 
@@ -331,7 +393,7 @@ struct BrowserRootView: View {
                     Text("읽고, 생각하고, 함께 정리하는 곳").font(.system(size: 10)).foregroundStyle(.secondary)
                 }
                 Spacer()
-                Label("로컬 개발판", systemImage: "laptopcomputer")
+                Label("공유 알파 0.2.0", systemImage: "person.2")
                     .font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
                 Menu {
                     Button("합성 기사로 사용해 보기", action: model.loadExample)
@@ -371,7 +433,7 @@ struct BrowserRootView: View {
             HStack {
                 Label("웹 세션은 종료 시 초기화됩니다", systemImage: "eye.slash")
                 Spacer()
-                Text("판단 기록은 이 기기에 보관 · 공유와 AI 전송 없음")
+                Text("초안은 기기에 보관 · 직접 승인한 기록만 공개")
                 Circle().fill(model.storageReady ? Theme.accent : .orange).frame(width: 6, height: 6)
             }
             .font(.system(size: 10)).foregroundStyle(.secondary)
@@ -504,7 +566,7 @@ struct WelcomeView: View {
                 welcomeStep("02", "생각 남기기", "인용·댓글·평가를 직접")
                 welcomeStep("03", "정리하기", "결정과 보류 모두 기록")
             }
-            Text("개발판 · 로컬 저장만 제공 · 인간 고유성이나 사실성을 인증하지 않습니다")
+            Text("공유 알파 · 같은 URL의 판단을 함께 봅니다 · 서명은 인간 고유성이나 사실성을 인증하지 않습니다")
                 .font(.system(size: 10)).foregroundStyle(.secondary).padding(.top, 15)
         }
         .padding(45).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
@@ -568,8 +630,12 @@ struct JudgmentPanel: View {
                         .background(Theme.accent.opacity(0.07)).clipShape(RoundedRectangle(cornerRadius: 8))
                 }
                 Divider()
+                if let shared = model.shared {
+                    SharedPanel(model: model, shared: shared, tab: tab)
+                    Divider()
+                }
                 HStack {
-                    Text("기록").font(.system(size: 14, weight: .semibold))
+                    Text("개인 기록").font(.system(size: 14, weight: .semibold))
                     Text("\(filtered.count)").font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
                     Spacer()
                     Picker("기록 범위", selection: $model.showAllRecords) {
@@ -650,6 +716,10 @@ struct JudgmentPanel: View {
                 Text(model.targetID == nil ? "아래 기록의 ‘연결’로 대상을 먼저 선택하세요." : "선택한 기록의 정확한 버전에 연결됩니다.")
                     .font(.system(size: 10)).foregroundStyle(.secondary)
             }
+            if let target = model.publicTarget {
+                Text("공개 \(label(target.kind)): \(target["text"])")
+                    .font(.system(size: 11)).lineLimit(4)
+            }
             if let id = model.targetID {
                 Text("대상 기록 \(id.prefix(16))…")
                     .font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
@@ -719,6 +789,12 @@ struct RecordCard: View {
             } else { Text("이유를 남기지 않았습니다.").font(.system(size: 11)).foregroundStyle(.secondary) }
             Text("작성 주체 \(record.actorID.prefix(12))…")
                 .font(.system(size: 9, design: .monospaced)).foregroundStyle(.secondary)
+            if let status = model.shared?.publicationStatus(record.id) {
+                Text(status).font(.system(size: 10)).foregroundStyle(Theme.accent)
+            } else {
+                Button("이 기록 공개하기") { model.preparePublication(record) }
+                    .font(.system(size: 11)).disabled(model.shared == nil || !SharedRecord.validURL(record.source.url))
+            }
             HStack(spacing: 12) {
                 Button("답변") { model.target(record, kind: .answer) }
                 Button("평가") { model.target(record, kind: .evaluation) }
@@ -729,7 +805,7 @@ struct RecordCard: View {
         }
         .padding(14).frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.white).clipShape(RoundedRectangle(cornerRadius: 10))
-        .confirmationDialog("이 기록의 승인을 철회할까요? 원기록과 철회 이력은 남습니다.",
+        .confirmationDialog("이 기록의 승인을 철회할까요? 공개된 기록은 서버에도 철회를 요청합니다. 원기록과 철회 이력은 남습니다.",
                             isPresented: $confirmWithdraw) {
             Button("승인 철회", role: .destructive) { model.withdraw(record) }
             Button("취소", role: .cancel) {}
@@ -769,6 +845,9 @@ struct ReviewSheet: View {
                                 .font(.system(size: 13)).textSelection(.enabled)
                             Text("작성 주체: \(targetRecord.actorID)").font(.system(size: 10, design: .monospaced))
                             Divider()
+                        } else if let target = item.publicTarget {
+                            Text("공개 대상: \(target["text"])").textSelection(.enabled)
+                            Text("작성 주체: \(target["actorId"])").font(.system(size: 10, design: .monospaced))
                         } else {
                             Text("대상 기록의 본문을 현재 저장소에서 찾지 못했습니다.").foregroundStyle(.secondary)
                         }
@@ -778,15 +857,21 @@ struct ReviewSheet: View {
                 }.frame(maxWidth: .infinity, alignment: .leading).padding(16)
             }
             .frame(maxHeight: 380).background(Theme.paper).clipShape(RoundedRectangle(cornerRadius: 10))
-            Label("저장 범위: 이 기기 · 외부 공개와 AI 전송 없음", systemImage: "laptopcomputer")
+            Label("공개하면 URL·인용·본문·평가·기기 서명이 Railway에 전송됩니다", systemImage: "person.2")
                 .font(.system(size: 12, weight: .medium)).foregroundStyle(Theme.accent)
+            Text("같은 URL을 보는 맥·안드로이드 사용자가 내용을 볼 수 있습니다. 공개 후 철회해도 이미 복사된 내용은 회수할 수 없습니다. 공유 연결 중에는 현재 URL을 서버에 보내 목록을 갱신합니다.")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
             Text("서명은 이 키로 작성했다는 기록입니다. 고유한 인간 또는 내용의 진실을 보증하지 않습니다.")
                 .font(.system(size: 10)).foregroundStyle(.secondary)
             HStack {
                 Button("계속 수정") { model.review = nil }.keyboardShortcut(.cancelAction)
                 Spacer()
-                Button("확인하고 로컬 저장") { model.saveReviewed(item) }
+                if item.publicTarget == nil && item.localRecordID == nil {
+                    Button("이 기기에만 저장") { model.saveReviewed(item) }
+                }
+                Button("확인하고 공개") { model.publishReviewed(item) }
                     .buttonStyle(.borderedProminent).tint(Theme.accent)
+                    .disabled(model.shared == nil || !SharedRecord.validURL(item.draft.source.url))
             }
         }
         .padding(28).frame(width: 560)

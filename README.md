@@ -26,8 +26,8 @@ Android 8.0 이상. 기존 0.1.0 위에 새 APK를 덮어 설치하면 됩니다
 
 ## macOS
 
-**[Mac 공용 ZIP 다운로드](https://github.com/wilcoco/human-browser/releases/download/macos-v0.1.0-alpha/human-browser-macos-0.1.0-alpha-universal.zip)** · [설치 안내](apps/macos/README.md)
+**[Mac 공용 ZIP 다운로드](https://github.com/wilcoco/human-browser/releases/download/macos-v0.2.0-alpha/human-browser-macos-0.2.0-alpha-universal.zip)** · [설치 안내](apps/macos/README.md)
 
 macOS 14 이상, Apple Silicon·Intel 공용. ZIP을 풀고 `Human Browser.app`을 응용 프로그램으로 옮깁니다. Apple 공증 전 알파이므로 첫 실행 때 개발자 확인 경고가 나올 수 있습니다.
 
-맥판은 현재 **로컬 개인 기록 버전**이며 Railway 공유·Android와 동기화는 아직 연결되지 않았습니다.
+맥판 0.2.0은 **Railway 공개 판단 공유·동기화**를 제공합니다. **함께 보는 판단 → 공유 연결**을 켜면 같은 URL의 Android·Mac 공개 기록을 확인합니다. 직접 확인하고 공개한 기록만 전송하며, 공개 평가·답변·철회와 오프라인 재시도를 지원합니다. 개인 초안·계정·서명 키 동기화는 별개로 아직 제공하지 않습니다.
