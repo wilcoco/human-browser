@@ -1,4 +1,4 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="org.humanbrowser.android" android:versionCode="2" android:versionName="0.2.0-alpha">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="org.humanbrowser.android" android:versionCode="3" android:versionName="0.2.1-alpha">
  <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="35" />
  <uses-permission android:name="android.permission.INTERNET" />
  <application android:label="사람 브라우저" android:icon="@drawable/ic_browser" android:theme="@style/AppTheme" android:allowBackup="false" android:fullBackupContent="false" android:usesCleartextTraffic="false" android:supportsRtl="true" android:debuggable="false">

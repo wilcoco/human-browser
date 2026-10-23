@@ -25,6 +25,7 @@ public final class MainActivity extends Activity {
     static final int PAPER = 0xfff6f5ef, INK = 0xff203e32, GREEN = 0xff286951, MUTED = 0xff687b71;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private WebView web;
+    private final ArrayList<WebView> windows = new ArrayList<>();
     private EditText address;
     private TextView status, panelTitle;
     private LinearLayout root, recordsBox, panel;
@@ -57,7 +58,7 @@ public final class MainActivity extends Activity {
             if (!saved.isEmpty()) draft = new JSONObject(saved);
         } catch (Exception e) { toast("보관한 초안을 읽지 못했습니다. 원본은 앱 저장소에 남아 있습니다."); }
         publicApi = new PublicApi(this);
-        buildUI(); configureWeb();
+        buildUI(); windows.add(web); configureWeb(web); web.requestFocus();
         String shared = getIntent().getStringExtra(Intent.EXTRA_TEXT);
         if (Intent.ACTION_SEND.equals(getIntent().getAction()) && shared != null) openSharedUrl(shared);
         else web.loadUrl(DEMO);
@@ -70,8 +71,8 @@ public final class MainActivity extends Activity {
     }
 
     private void openSharedUrl(String shared) {
-        java.util.regex.Matcher match = java.util.regex.Pattern.compile("https://[^\\s<>]+").matcher(shared);
-        if (match.find() && isWebUrl(match.group())) navigate(match.group());
+        java.util.regex.Matcher match = java.util.regex.Pattern.compile("https?://[^\\s<>]+", java.util.regex.Pattern.CASE_INSENSITIVE).matcher(shared);
+        if (match.find()) navigate(match.group());
         else { toast("공유된 내용에서 HTTPS 주소를 찾지 못했습니다."); if(currentUrl.isEmpty()) web.loadUrl(DEMO); }
     }
 
@@ -89,8 +90,8 @@ public final class MainActivity extends Activity {
         heading.addView(button("메뉴", v -> showMenu(v)));
         root.addView(heading);
         LinearLayout nav = row(); nav.setPadding(dp(6), 0, dp(6), 0);
-        nav.addView(button("‹", v -> { if (web.canGoBack()) web.goBack(); }));
-        address = new EditText(this); address.setSingleLine(true); address.setTextSize(14);
+        nav.addView(button("‹", v -> goBack()));
+        address = new EditText(this); address.setSingleLine(true); address.setTextSize(14); address.setSelectAllOnFocus(true);
         address.setHint("웹 주소 또는 검색어"); address.setContentDescription("주소 또는 검색어");
         address.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_URI);
         address.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_GO);
@@ -118,8 +119,8 @@ public final class MainActivity extends Activity {
         root.addView(panel, new LinearLayout.LayoutParams(-1, dp(290)));
     }
 
-    @SuppressWarnings("deprecation") private void configureWeb() {
-        WebSettings s = web.getSettings();
+    @SuppressWarnings("deprecation") private void configureWeb(WebView browser) {
+        WebSettings s = browser.getSettings();
         s.setJavaScriptEnabled(true); s.setDomStorageEnabled(true);
         s.setAllowFileAccess(false); s.setAllowContentAccess(false);
         s.setAllowFileAccessFromFileURLs(false); s.setAllowUniversalAccessFromFileURLs(false);
@@ -128,14 +129,29 @@ public final class MainActivity extends Activity {
         s.setGeolocationEnabled(false); s.setMediaPlaybackRequiresUserGesture(true);
         s.setSafeBrowsingEnabled(true);
         WebView.setWebContentsDebuggingEnabled(false);
-        CookieManager.getInstance().setAcceptThirdPartyCookies(web, false);
-        web.removeJavascriptInterface("searchBoxJavaBridge_");
-        web.removeJavascriptInterface("accessibility"); web.removeJavascriptInterface("accessibilityTraversal");
-        web.setDownloadListener((url, ua, cd, mime, size) -> toast("이 알파 버전은 파일 다운로드를 지원하지 않습니다."));
-        web.setWebViewClient(new WebViewClient() {
+        CookieManager.getInstance().setAcceptThirdPartyCookies(browser, false);
+        browser.removeJavascriptInterface("searchBoxJavaBridge_");
+        browser.removeJavascriptInterface("accessibility"); browser.removeJavascriptInterface("accessibilityTraversal");
+        browser.setDownloadListener((url, ua, cd, mime, size) -> toast("이 알파 버전은 파일 다운로드를 지원하지 않습니다."));
+        browser.setWebViewClient(new WebViewClient() {
             @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest req) {
-                if (!isWebUrl(req.getUrl().toString())) { if (req.isForMainFrame()) toast("HTTPS 웹 주소만 열 수 있습니다."); return true; }
-                return false;
+                String url = req.getUrl().toString();
+                if ("about:blank".equals(url)) return false;
+                if (isWebUrl(url)) return false;
+                if (!req.isForMainFrame()) return true;
+                // Upgrade old HTTP links without ever sending an unencrypted request.
+                if ("http".equalsIgnoreCase(req.getUrl().getScheme()) && "GET".equals(req.getMethod())) {
+                    try { view.loadUrl(UrlInput.fromInput(url)); } catch (IllegalArgumentException e) { toast(e.getMessage()); }
+                    return true;
+                }
+                if ("intent".equalsIgnoreCase(req.getUrl().getScheme())) {
+                    try {
+                        String fallback = Intent.parseUri(url, Intent.URI_INTENT_SCHEME).getStringExtra("browser_fallback_url");
+                        if (isWebUrl(fallback)) { view.loadUrl(UrlInput.fromInput(fallback)); return true; }
+                    } catch (Exception ignored) { }
+                }
+                toast("이 링크는 웹 주소가 아닌 외부 앱 연결입니다. (" + req.getUrl().getScheme() + ")");
+                return true;
             }
             @Override public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest req) {
                 String u = req.getUrl().toString();
@@ -146,35 +162,43 @@ public final class MainActivity extends Activity {
                 return super.shouldInterceptRequest(view, req);
             }
             @Override public void onPageStarted(WebView view, String url, android.graphics.Bitmap icon) {
+                if (view != web) return;
                 navigationGeneration++; pageReady = false; failedUrl = ""; syncUrl();
             }
-            @Override public void doUpdateVisitedHistory(WebView view, String url, boolean reload) { syncUrl(); }
+            @Override public void doUpdateVisitedHistory(WebView view, String url, boolean reload) { if (view == web) syncUrl(); }
             @Override public void onPageFinished(WebView view, String url) {
+                if (view != web) return;
                 if (url.equals(view.getUrl()) && !url.equals(failedUrl) && isWebUrl(url)) pageReady = true;
                 syncUrl(); progress.setVisibility(View.GONE);
             }
             @Override public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
-                if (request.isForMainFrame()) { pageReady = false; failedUrl = request.getUrl().toString(); status.setText("페이지를 열지 못했습니다. 주소와 연결을 확인하세요."); }
+                if (view == web && request.isForMainFrame()) { pageReady = false; failedUrl = request.getUrl().toString(); status.setText("페이지를 열지 못했습니다. 주소와 연결을 확인하세요."); }
             }
             @Override public void onReceivedSslError(WebView view, SslErrorHandler h, SslError error) {
-                h.cancel(); pageReady = false; failedUrl = view.getUrl(); toast("인증서 확인에 실패하여 연결을 중단했습니다.");
+                h.cancel(); if (view != web) return; pageReady = false; failedUrl = view.getUrl(); toast("인증서 확인에 실패하여 연결을 중단했습니다.");
             }
             @Override public void onReceivedHttpAuthRequest(WebView view, HttpAuthHandler h, String host, String realm) { h.cancel(); }
             @Override public void onSafeBrowsingHit(WebView view, WebResourceRequest req, int type, SafeBrowsingResponse response) { response.backToSafety(true); }
             @Override public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
-                pageReady = false; toast("웹 프로세스가 종료되었습니다. 앱을 다시 열어 주세요. 기록은 보관되어 있습니다.");
-                root.removeView(view); view.destroy(); return true;
+                toast("웹 프로세스가 종료되었습니다. 페이지를 다시 열어 주세요. 기록은 보관되어 있습니다.");
+                closeWindow(view); return true;
             }
         });
-        web.setWebChromeClient(new WebChromeClient() {
-            @Override public void onProgressChanged(WebView view, int p) { progress.setProgress(p); progress.setVisibility(p < 100 ? View.VISIBLE : View.GONE); }
-            @Override public void onReceivedTitle(WebView view, String title) { if (expanded) refreshRecords(); }
+        browser.setWebChromeClient(new WebChromeClient() {
+            @Override public void onProgressChanged(WebView view, int p) { if (view != web) return; progress.setProgress(p); progress.setVisibility(p < 100 ? View.VISIBLE : View.GONE); }
+            @Override public void onReceivedTitle(WebView view, String title) { if (view == web && expanded) refreshRecords(); }
             @Override public void onPermissionRequest(PermissionRequest r) { r.deny(); }
             @Override public void onGeolocationPermissionsShowPrompt(String origin, GeolocationPermissions.Callback callback) { callback.invoke(origin, false, false); }
             @Override public boolean onShowFileChooser(WebView view, android.webkit.ValueCallback<Uri[]> cb, FileChooserParams params) { cb.onReceiveValue(null); return true; }
             @Override public boolean onCreateWindow(WebView v, boolean dialog, boolean gesture, Message msg) {
-                toast("새 창 링크는 길게 눌러 주소를 복사한 뒤 주소창에서 열 수 있습니다."); return false;
+                if (!gesture || v != web) return false;
+                if (windows.size() >= 8) { toast("열린 창이 많습니다. 뒤로가기로 창을 닫은 뒤 다시 열어 주세요."); return false; }
+                WebView child = new WebView(MainActivity.this);
+                configureWeb(child); windows.add(child); activateWindow(child);
+                ((WebView.WebViewTransport)msg.obj).setWebView(child); msg.sendToTarget();
+                return true;
             }
+            @Override public void onCloseWindow(WebView window) { closeWindow(window); }
             @Override public boolean onJsAlert(WebView v, String u, String m, JsResult r) { r.cancel(); return true; }
             @Override public boolean onJsConfirm(WebView v, String u, String m, JsResult r) { r.cancel(); return true; }
             @Override public boolean onJsPrompt(WebView v, String u, String m, String d, JsPromptResult r) { r.cancel(); return true; }
@@ -184,18 +208,44 @@ public final class MainActivity extends Activity {
     private String shortTitle(String title) {
         return title.codePointCount(0,title.length()) > 500 ? title.substring(0,title.offsetByCodePoints(0,500)) + "…" : title;
     }
-    private boolean isWebUrl(String value) {
-        if (value == null || value.length() > 8192) return false;
-        Uri u = Uri.parse(value);
-        return "https".equalsIgnoreCase(u.getScheme()) && u.getHost() != null && u.getUserInfo() == null;
-    }
+    private boolean isWebUrl(String value) { return UrlInput.isHttps(value); }
     private void navigate(String input) {
-        String value = input.trim(); if (value.isEmpty()) return;
-        if (!value.contains(" ") && !value.contains(":") && value.contains(".")) value = "https://" + value;
-        else if (!value.matches("^[A-Za-z][A-Za-z0-9+.-]*:.*")) value = "https://duckduckgo.com/?q=" + Uri.encode(value);
-        if (!isWebUrl(value)) { toast("이 알파에서는 HTTPS 주소를 지원합니다."); return; }
+        if (input == null || UrlInput.stripEdges(input).isEmpty()) return;
+        final String value;
+        try { value = UrlInput.fromInput(input); }
+        catch (IllegalArgumentException e) { toast(e.getMessage()); return; }
         ((InputMethodManager)getSystemService(INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(address.getWindowToken(), 0);
         address.clearFocus(); web.requestFocus(); pageReady = false; navigationGeneration++; web.loadUrl(value);
+    }
+    private void activateWindow(WebView next) {
+        int position = root.indexOfChild(web);
+        if (position < 0) position = 3;
+        root.removeView(web); web = next;
+        root.addView(web, position, new LinearLayout.LayoutParams(-1, 0, 1));
+        address.clearFocus(); web.requestFocus();
+        navigationGeneration++; failedUrl = "";
+        pageReady = web.getProgress() == 100 && isWebUrl(web.getUrl());
+        // Blank child windows must not retain their opener's URL or judgment panel.
+        currentUrl = ""; address.setText(web.getUrl() == null ? "" : web.getUrl());
+        syncUrl(); refreshRecords();
+        progress.setProgress(web.getProgress()); progress.setVisibility(pageReady ? View.GONE : View.VISIBLE);
+    }
+    private void closeWindow(WebView window) {
+        if (!windows.contains(window)) return;
+        if (window == web) {
+            int index = windows.indexOf(window);
+            windows.remove(window);
+            if (windows.isEmpty()) {
+                WebView replacement = new WebView(this); configureWeb(replacement); windows.add(replacement);
+                activateWindow(replacement); replacement.loadUrl(DEMO);
+            } else activateWindow(windows.get(Math.max(0, index - 1)));
+        } else windows.remove(window);
+        window.destroy();
+    }
+    private boolean goBack() {
+        if (web.canGoBack()) { web.goBack(); return true; }
+        if (windows.size() > 1) { closeWindow(web); return true; }
+        return false;
     }
     private void syncUrl() {
         if (web == null) return;
@@ -433,7 +483,7 @@ public final class MainActivity extends Activity {
                 case 1: pageReady=false; web.reload(); break;
                 case 2: if(draft!=null) showEditor(); else toast("작성 중인 초안이 없습니다."); break;
                 case 3: exportRecords(); break;
-                case 4: new AlertDialog.Builder(this).setTitle("사람 브라우저 · 0.2.0 알파")
+                case 4: new AlertDialog.Builder(this).setTitle("사람 브라우저 · 0.2.1 알파")
                     .setMessage("웹페이지는 휴대폰에서 직접 엽니다. 개인 기록과 초안은 앱 내부에 보관합니다. 공개하기를 확인한 기록만 Railway 서버에 전송합니다.\n\n공개/개인 버튼에서 다른 사람의 공개 기록을 볼 수 있습니다. 공개 보기 중에는 페이지 주소가 서버로 전달됩니다. AI와 분산망은 아직 없습니다. HTTPS 페이지를 지원합니다.\n\n웹사이트는 접속 주소와 일반적인 웹 요청을 받습니다. 공개한 기록은 다른 사람이 열람·복사할 수 있습니다. 철회하면 공개 목록에서 숨겨지며 서버 이력과 이미 전달된 사본은 남습니다. 앱 삭제 시 로컬 기록과 서명 키가 삭제됩니다.\n\nMac 개발판과 기록 파일 형식은 아직 호환되지 않습니다.")
                     .setPositiveButton("확인",null).show(); break;
                 case 5: flushPublic(); break;
@@ -464,8 +514,8 @@ public final class MainActivity extends Activity {
     private void persistDraft(){ getPreferences(MODE_PRIVATE).edit().putString("draft",draft==null?"":draft.toString()).apply(); }
     @Override protected void onResume(){ super.onResume(); handler.post(observe); if(web!=null) web.onResume(); }
     @Override protected void onPause(){ handler.removeCallbacks(observe); persistDraft(); if(web!=null) web.onPause(); super.onPause(); }
-    @Override protected void onDestroy(){ handler.removeCallbacksAndMessages(null); if(editor!=null) editor.dismiss(); if(web!=null){root.removeView(web);web.destroy();} network.shutdown(); if(store!=null) store.close();super.onDestroy(); }
-    @Override public void onBackPressed(){ if(expanded){togglePanel();return;} if(web.canGoBack()){web.goBack();return;}super.onBackPressed(); }
+    @Override protected void onDestroy(){ handler.removeCallbacksAndMessages(null); if(editor!=null) editor.dismiss(); if(web!=null) root.removeView(web); for(WebView window:windows) window.destroy(); windows.clear(); network.shutdown(); if(store!=null) store.close();super.onDestroy(); }
+    @Override public void onBackPressed(){ if(expanded){togglePanel();return;} if(goBack())return;super.onBackPressed(); }
     private void addChoice(LinearLayout parent,String label,String key,String[] values){
         parent.addView(text(label,12,MUTED)); Spinner s=spinner(values,indexOf(values,draft.optString(key)));parent.addView(s);
         s.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener(){ public void onNothingSelected(AdapterView<?>p){} public void onItemSelected(AdapterView<?>p,View v,int pos,long id){if(draft!=null){put(draft,key,values[pos]);persistDraft();}}});

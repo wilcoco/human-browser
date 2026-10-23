@@ -26,8 +26,8 @@ find "$build/classes" -name '*.class' -print > "$build/classes.txt"
 cp "$build/base.apk" "$build/unsigned.apk"
 (cd "$build/dex" && zip -q -j "$build/unsigned.apk" classes*.dex)
 "$tools/zipalign" -f -p 4 "$build/unsigned.apk" "$build/aligned.apk"
-output="$root/outputs/human-browser-android-0.2.0-alpha.apk"
+output="$root/outputs/human-browser-android-0.2.1-alpha.apk"
 "$tools/apksigner" sign --ks "$keys/release.jks" --ks-key-alias human-browser-release --ks-pass "file:$keys/password" --out "$output" "$build/aligned.apk"
 "$tools/apksigner" verify --verbose --print-certs "$output"
-(cd "$root/outputs" && shasum -a 256 human-browser-android-0.2.0-alpha.apk > human-browser-android-0.2.0-alpha.apk.sha256)
+(cd "$root/outputs" && shasum -a 256 human-browser-android-0.2.1-alpha.apk > human-browser-android-0.2.1-alpha.apk.sha256)
 printf '\nAPK: %s\n' "$output"
