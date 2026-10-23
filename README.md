@@ -17,9 +17,17 @@ Android 8.0 이상. 기존 0.1.0 위에 새 APK를 덮어 설치하면 됩니다
 
 [설치·사용·개인정보·빌드 안내](apps/android/README.md)
 
-이 저장소에는 Android 앱 소스와 빌드·검증 스크립트가 있습니다. 개인 기록, 서명 개인키, 대화 및 특허 원본은 포함하지 않습니다.
+이 저장소에는 Android·macOS 앱 소스와 빌드·검증 스크립트가 있습니다. 개인 기록, 서명 개인키, 대화 및 특허 원본은 포함하지 않습니다.
 
 
 ## Railway 중앙 백엔드
 
 0.2.0부터 개인 기록별 공개 게시와 페이지별 공개 댓글 조회를 지원합니다. 기존 개인 기록은 자동 업로드하지 않습니다. 분산망은 후순위입니다. [백엔드 구성·API·운영 안내](services/api/README.md)를 참고하세요.
+
+## macOS
+
+**[Mac 공용 ZIP 다운로드](https://github.com/wilcoco/human-browser/releases/download/macos-v0.1.0-alpha/human-browser-macos-0.1.0-alpha-universal.zip)** · [설치 안내](apps/macos/README.md)
+
+macOS 14 이상, Apple Silicon·Intel 공용. ZIP을 풀고 `Human Browser.app`을 응용 프로그램으로 옮깁니다. Apple 공증 전 알파이므로 첫 실행 때 개발자 확인 경고가 나올 수 있습니다.
+
+맥판은 현재 **로컬 개인 기록 버전**이며 Railway 공유·Android와 동기화는 아직 연결되지 않았습니다.
